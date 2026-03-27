@@ -1,0 +1,837 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Terminal, Brain, Cpu, Search, Lock, Unlock, ChevronRight, Award, RefreshCw, Volume2, VolumeX, Activity, Zap, Check, UserCircle, ArrowRight, Sparkles, MessageSquare, Send, X, Loader } from 'lucide-react';
+
+// --- Gemini API 設定 ---
+const apiKey = ""; // 系統將自動注入 API Key
+
+// --- 音效系統 (Web Audio API) ---
+const useSound = () => {
+  const [isMuted, setIsMuted] = useState(false);
+  const audioCtxRef = useRef(null);
+
+  const initAudio = () => {
+    if (!audioCtxRef.current) {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      audioCtxRef.current = new AudioContext();
+    }
+    if (audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume();
+    }
+  };
+
+  const playTone = (freq, type, duration, delay = 0, volume = 0.1) => {
+    if (isMuted || !audioCtxRef.current) return;
+    
+    const ctx = audioCtxRef.current;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, ctx.currentTime + delay);
+    
+    gain.gain.setValueAtTime(volume, ctx.currentTime + delay);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + delay + duration);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(ctx.currentTime + delay);
+    osc.stop(ctx.currentTime + delay + duration);
+  };
+
+  const playSound = (effect) => {
+    initAudio();
+    if (isMuted) return;
+
+    switch (effect) {
+      case 'hover':
+        playTone(400, 'sine', 0.05, 0, 0.05);
+        break;
+      case 'click':
+        playTone(800, 'square', 0.1, 0, 0.1);
+        playTone(600, 'square', 0.1, 0.05, 0.1);
+        break;
+      case 'success':
+        playTone(600, 'sine', 0.1, 0, 0.1);
+        playTone(800, 'sine', 0.1, 0.1, 0.1);
+        playTone(1200, 'sine', 0.3, 0.2, 0.1);
+        break;
+      case 'error':
+        playTone(150, 'sawtooth', 0.1, 0, 0.15);
+        playTone(100, 'sawtooth', 0.3, 0.1, 0.15);
+        break;
+      case 'ai_thinking':
+        playTone(800, 'sine', 0.05, 0, 0.05);
+        playTone(1200, 'sine', 0.05, 0.1, 0.05);
+        break;
+      case 'ai_response':
+        playTone(600, 'sine', 0.2, 0, 0.1);
+        playTone(900, 'sine', 0.4, 0.1, 0.1);
+        break;
+      case 'complete':
+        playTone(100, 'sawtooth', 1.5, 0, 0.2); 
+        playTone(60, 'sine', 2.0, 0, 0.3);
+        const notes = [261.63, 329.63, 392.00, 523.25, 659.25, 783.99];
+        notes.forEach((freq, i) => playTone(freq, 'square', 0.3, i * 0.1, 0.1));
+        const finalDelay = 0.6;
+        playTone(523.25, 'triangle', 2.5, finalDelay, 0.15);
+        playTone(659.25, 'triangle', 2.5, finalDelay, 0.15);
+        playTone(783.99, 'triangle', 2.5, finalDelay, 0.15);
+        playTone(1046.50, 'sine', 3.0, finalDelay, 0.1);
+        break;
+      default:
+        break;
+    }
+  };
+
+  return { playSound, isMuted, setIsMuted, initAudio };
+};
+
+// --- Gemini Service ---
+const callGemini = async (prompt) => {
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error('API request failed');
+    }
+
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "訊號干擾中...無法連接資料庫。";
+  } catch (error) {
+    console.error("Gemini Error:", error);
+    return "連線錯誤：時空通訊中斷。";
+  }
+};
+
+// --- 視覺元件 ---
+const TechBackground = () => (
+  <div className="absolute inset-0 overflow-hidden pointer-events-none z-0">
+    <div className="absolute inset-0 bg-slate-950"></div>
+    <div className="absolute inset-0 bg-[linear-gradient(to_right,#0ea5e91a_1px,transparent_1px),linear-gradient(to_bottom,#0ea5e91a_1px,transparent_1px)] bg-[size:40px_40px] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)]"></div>
+    <div className="absolute inset-0 bg-gradient-to-b from-transparent via-cyan-500/5 to-transparent h-32 w-full animate-scanline"></div>
+  </div>
+);
+
+const TechFrame = ({ children, className = "" }) => (
+  <div className={`relative bg-slate-900/80 border border-cyan-500/30 backdrop-blur-md p-6 rounded-xl ${className}`}>
+    <div className="absolute top-0 left-0 w-8 h-8 border-t-2 border-l-2 border-cyan-400 rounded-tl-lg"></div>
+    <div className="absolute top-0 right-0 w-8 h-8 border-t-2 border-r-2 border-cyan-400 rounded-tr-lg"></div>
+    <div className="absolute bottom-0 left-0 w-8 h-8 border-b-2 border-l-2 border-cyan-400 rounded-bl-lg"></div>
+    <div className="absolute bottom-0 right-0 w-8 h-8 border-b-2 border-r-2 border-cyan-400 rounded-br-lg"></div>
+    <div className="absolute top-0 left-1/2 -translate-x-1/2 w-1/3 h-[2px] bg-gradient-to-r from-transparent via-cyan-500 to-transparent"></div>
+    <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-1/3 h-[2px] bg-gradient-to-r from-transparent via-cyan-500 to-transparent"></div>
+    {children}
+  </div>
+);
+
+// --- AI 協同助手元件 ---
+const AICopilot = ({ currentQuestion, playSound }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const messagesEndRef = useRef(null);
+
+  const toggleOpen = () => {
+    playSound('click');
+    setIsOpen(!isOpen);
+    if (!isOpen && messages.length === 0) {
+      // Initial greeting
+      setMessages([{
+        role: 'assistant',
+        text: "探員你好，我是本次任務的 AI 協同終端。我可以協助你分析當前的歷史數據。你可以直接詢問我關於題目的背景，或點擊「分析線索」。"
+      }]);
+    }
+  };
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, isOpen]);
+
+  const handleSendMessage = async (textOverride = null) => {
+    const textToSend = textOverride || input;
+    if (!textToSend.trim() || isLoading) return;
+
+    playSound('click');
+    const userMsg = { role: 'user', text: textToSend };
+    setMessages(prev => [...prev, userMsg]);
+    setInput("");
+    setIsLoading(true);
+    playSound('ai_thinking');
+
+    // 建構 Prompt
+    const systemPrompt = `
+      你是一個來自2060年的 AI 歷史檔案管理員。
+      目前使用者正在進行一個關於「AI 科學家歷史」的解謎遊戲。
+      
+      當前題目：${currentQuestion?.question || "未知"}
+      當前提示：${currentQuestion?.hint || "無"}
+      
+      請根據學生的問題回答。
+      規則：
+      1. 語氣要有未來感、科技感，像是一個高級 AI 助手。
+      2. 絕對不要直接給出題目的標準答案。
+      3. 給予引導性的提示，或是講述相關的歷史冷知識、科學家軼事來幫助學生思考。
+      4. 回答盡量簡短有力（100字以內），適合手機閱讀。
+      5. 使用繁體中文。
+    `;
+
+    const fullPrompt = `${systemPrompt}\n\n學生問：${textToSend}`;
+
+    const aiResponseText = await callGemini(fullPrompt);
+    
+    setIsLoading(false);
+    setMessages(prev => [...prev, { role: 'assistant', text: aiResponseText }]);
+    playSound('ai_response');
+  };
+
+  const handleSmartAnalyze = () => {
+    handleSendMessage(`請分析關於「${currentQuestion?.question}」的關鍵線索，並告訴我一個相關的有趣故事，但不要直接說出答案。`);
+  };
+
+  return (
+    <>
+      <button
+        onClick={toggleOpen}
+        className={`fixed bottom-6 right-6 z-50 p-4 rounded-full shadow-[0_0_20px_rgba(6,182,212,0.5)] transition-all duration-300 hover:scale-110 flex items-center justify-center border border-cyan-400/50
+          ${isOpen ? 'bg-slate-800 rotate-90' : 'bg-gradient-to-r from-cyan-600 to-blue-600 animate-pulse-slow'}
+        `}
+      >
+        {isOpen ? <X className="w-6 h-6 text-cyan-400" /> : <Sparkles className="w-6 h-6 text-white" />}
+      </button>
+
+      {isOpen && (
+        <div className="fixed bottom-24 right-4 left-4 md:left-auto md:w-96 h-[60vh] bg-slate-900/95 backdrop-blur-xl border border-cyan-500/30 rounded-2xl shadow-2xl z-50 flex flex-col overflow-hidden animate-scale-in">
+          <div className="bg-slate-800/80 p-3 border-b border-cyan-500/20 flex items-center justify-between">
+            <div className="flex items-center text-cyan-400 font-mono text-sm">
+              <Brain className="w-4 h-4 mr-2" />
+              AI 協同終端 (ONLINE)
+            </div>
+            <div className="flex gap-1">
+               <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin scrollbar-thumb-cyan-900 scrollbar-track-transparent">
+            {messages.map((msg, idx) => (
+              <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[85%] rounded-2xl p-3 text-sm leading-relaxed
+                  ${msg.role === 'user' 
+                    ? 'bg-cyan-900/50 text-cyan-100 rounded-br-none border border-cyan-500/30' 
+                    : 'bg-slate-800/80 text-slate-300 rounded-bl-none border border-slate-700'}
+                `}>
+                  {msg.text}
+                </div>
+              </div>
+            ))}
+            {isLoading && (
+              <div className="flex justify-start">
+                <div className="bg-slate-800/50 rounded-2xl p-3 flex items-center gap-2 border border-slate-700">
+                  <Loader className="w-4 h-4 text-cyan-400 animate-spin" />
+                  <span className="text-xs text-cyan-400 font-mono">ANALYZING...</span>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          <div className="p-3 bg-slate-800/50 border-t border-cyan-500/20 space-y-3">
+            <button 
+              onClick={handleSmartAnalyze}
+              disabled={isLoading}
+              className="w-full py-2 bg-cyan-950/50 hover:bg-cyan-900/50 border border-cyan-500/30 rounded-lg text-cyan-400 text-xs font-mono flex items-center justify-center transition-colors disabled:opacity-50"
+            >
+              <Sparkles className="w-3 h-3 mr-2" />
+              ✨ 分析當前時空數據
+            </button>
+
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                placeholder="輸入指令或詢問..."
+                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 transition-all placeholder-slate-600"
+              />
+              <button 
+                onClick={() => handleSendMessage()}
+                disabled={!input.trim() || isLoading}
+                className="p-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Send className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+};
+
+// --- 原始遊戲資料 ---
+const sourceGameData = [
+  {
+    id: 1,
+    title: "第一層級：科學家的關鍵時刻",
+    icon: <Brain className="w-6 h-6" />,
+    description: "修復 AI 誕生初期的核心數據。請在展區尋找關於「達特茅斯」、「圖靈」與「全才大師」的紀錄。",
+    questions: [
+      {
+        id: "q1-1",
+        type: "choice",
+        question: "AI 一詞在 1956 年的會議中定名。這場傳奇會議的發起人是誰？",
+        options: ["艾倫·杜林", "約翰·麥卡錫 (John McCarthy)", "馮·諾伊曼", "傑弗里·辛頓"],
+        answer: "約翰·麥卡錫 (John McCarthy)",
+        hint: "提示：他的名字縮寫是 J.M.，常被稱為 AI 之父之一。"
+      },
+      {
+        id: "q1-2",
+        type: "choice",
+        question: "艾倫·杜林提出判斷機器是否具備智慧的方法，稱為？",
+        options: ["圖靈測試 (Turing Test)", "模仿遊戲", "智商測驗", "深度學習"],
+        answer: "圖靈測試 (Turing Test)",
+        hint: "提示：如果人類無法分辨對話者是機器還是人，則通過此測試。"
+      },
+      {
+        id: "q1-3",
+        type: "choice",
+        question: "哪位諾貝爾獎得主與朋友開發了「邏輯理論家」程式，且跨足心理學與經濟學？",
+        options: ["赫伯特·賽門 (Herbert Simon)", "馬文·明斯基", "亞瑟·山繆", "李飛飛"],
+        answer: "赫伯特·賽門 (Herbert Simon)",
+        hint: "提示：展板上可能提到他在 1978 年獲得諾貝爾經濟學獎。"
+      }
+    ]
+  },
+  {
+    id: 2,
+    title: "第二層級：AI 的興衰起落",
+    icon: <Cpu className="w-6 h-6" />,
+    description: "歷史數據出現斷層。請修復關於「AI 寒冬」與「現代復興」的時間軸。",
+    questions: [
+      {
+        id: "q2-1",
+        type: "input",
+        question: "1997 年，IBM 的哪一台超級電腦擊敗了世界西洋棋王？",
+        acceptedAnswers: ["DeepBlue", "Deep Blue", "deep blue", "深藍"],
+        answer: "DeepBlue (深藍)",
+        hint: "提示：由兩個字組成，顏色是藍色 (英文不需空白)。"
+      },
+      {
+        id: "q2-2",
+        type: "choice",
+        question: "1970 年代第一次 AI 寒冬的主要原因是什麼？",
+        options: ["運算能力不足與邏輯限制", "網際網路尚未普及", "電力供應不穩", "缺乏大數據"],
+        answer: "運算能力不足與邏輯限制",
+        hint: "提示：當時的電腦連簡單的常識都難以處理。"
+      },
+      {
+        id: "q2-3",
+        type: "input",
+        question: "2010 年後，哪項技術的成熟讓機器能像大腦神經元一樣進行多層學習？",
+        acceptedAnswers: ["深度學習", "Deep Learning", "deep learning"],
+        answer: "深度學習",
+        hint: "提示：Deep L_______ (請輸入中文)。"
+      }
+    ]
+  },
+  {
+    id: 3,
+    title: "第三層級：圖像與軼事觀察",
+    icon: <Search className="w-6 h-6" />,
+    description: "解密最後的視覺檔案。請仔細觀察展區中的肖像與歷史插圖。",
+    questions: [
+      {
+        id: "q3-1",
+        type: "choice",
+        question: "哪位科學家在二戰期間協助盟軍破解了德軍的「恩尼格瑪 (Enigma)」密碼機？",
+        options: ["艾倫·杜林 (Alan Turing)", "約翰·納什", "愛因斯坦", "霍金"],
+        answer: "艾倫·杜林 (Alan Turing)",
+        hint: "提示：他也是電腦科學的奠基人之一，展區有他的肖像。"
+      },
+      {
+        id: "q3-2",
+        type: "choice",
+        question: "展覽提到哪一個西方古文明曾有「自動劇院」或「自動噴泉」的紀錄？",
+        options: ["古希臘", "古羅馬", "古埃及", "美索不達米亞"],
+        answer: "古希臘",
+        hint: "提示：亞歷山卓的希羅 (Hero of Alexandria) 是這時期的代表人物。"
+      }
+    ]
+  }
+];
+
+const shuffleArray = (array) => {
+  const newArray = [...array];
+  for (let i = newArray.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
+  }
+  return newArray;
+};
+
+const getShuffledGameData = (originalData) => {
+  return originalData.map(level => ({
+    ...level,
+    questions: level.questions.map(q => {
+      if (q.type === 'choice') {
+        return {
+          ...q,
+          options: shuffleArray(q.options)
+        };
+      }
+      return q;
+    })
+  }));
+};
+
+const App = () => {
+  const [activeGameData, setActiveGameData] = useState(() => getShuffledGameData(sourceGameData));
+  const [gameState, setGameState] = useState('start');
+  const [studentClass, setStudentClass] = useState('');
+  const [studentName, setStudentName] = useState('');
+  const [isStudentInfoLocked, setIsStudentInfoLocked] = useState(false);
+  const [currentLevelIndex, setCurrentLevelIndex] = useState(0);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [userInput, setUserInput] = useState('');
+  const [feedback, setFeedback] = useState(null);
+  const [history, setHistory] = useState([]);
+  
+  const { playSound, isMuted, setIsMuted, initAudio } = useSound();
+
+  const vibrate = (pattern = [50]) => {
+    try {
+      if (typeof window !== 'undefined' && navigator && navigator.vibrate) {
+        navigator.vibrate(pattern);
+      }
+    } catch (e) {
+      // 忽略錯誤以防阻斷流程
+    }
+  };
+
+  const currentLevel = activeGameData[currentLevelIndex];
+  const currentQuestion = currentLevel?.questions[currentQuestionIndex];
+
+  const handleStart = () => {
+    initAudio();
+    playSound('click');
+    setGameState('playing');
+    vibrate();
+  };
+
+  const handleChoiceSubmit = (selectedOption) => {
+    if (feedback) return;
+    playSound('click');
+
+    if (selectedOption === currentQuestion.answer) {
+      handleCorrectAnswer();
+    } else {
+      handleWrongAnswer();
+    }
+  };
+
+  const handleInputSubmit = (e) => {
+    e.preventDefault();
+    if (feedback) return;
+    playSound('click');
+
+    const isCorrect = currentQuestion.acceptedAnswers.some(
+      ans => userInput.trim().toLowerCase() === ans.toLowerCase()
+    );
+
+    if (isCorrect) {
+      handleCorrectAnswer();
+    } else {
+      handleWrongAnswer();
+    }
+  };
+
+  const handleCorrectAnswer = () => {
+    vibrate([50, 50, 50]);
+    playSound('success');
+    setFeedback({ type: 'success', msg: '數據修復成功！存取權限確認。' });
+    
+    setTimeout(() => {
+      setFeedback(null);
+      setUserInput('');
+      
+      if (currentQuestionIndex < currentLevel.questions.length - 1) {
+        setCurrentQuestionIndex(prev => prev + 1);
+      } else {
+        handleLevelComplete();
+      }
+    }, 1500);
+  };
+
+  const handleWrongAnswer = () => {
+    vibrate([200]);
+    playSound('error');
+    setFeedback({ type: 'error', msg: `存取被拒絕。${currentQuestion.hint}` });
+    setTimeout(() => {
+      setFeedback(null);
+    }, 3500);
+  };
+
+  const handleLevelComplete = () => {
+    const newHistory = [...history, ...currentLevel.questions];
+    setHistory(newHistory);
+    playSound('success');
+
+    if (currentLevelIndex < activeGameData.length - 1) {
+      setCurrentLevelIndex(prev => prev + 1);
+      setCurrentQuestionIndex(0);
+    } else {
+      setGameState('complete');
+    }
+  };
+
+  const handleStudentInfoConfirm = () => {
+    if (!studentClass.trim() || !studentName.trim()) {
+      playSound('error');
+      vibrate([200]);
+      setFeedback({ type: 'error', msg: '登記失敗：請輸入完整的「班級」與「姓名」以完成認證程序。' });
+      setTimeout(() => {
+        setFeedback(null);
+      }, 3000);
+      return;
+    }
+    playSound('complete');
+    vibrate([50, 50, 100, 100]);
+    setIsStudentInfoLocked(true);
+  };
+
+  const resetGame = () => {
+    playSound('click');
+    setGameState('start');
+    setCurrentLevelIndex(0);
+    setCurrentQuestionIndex(0);
+    setHistory([]);
+    setFeedback(null);
+    setStudentClass('');
+    setStudentName('');
+    setIsStudentInfoLocked(false);
+    setActiveGameData(getShuffledGameData(sourceGameData));
+  };
+
+  if (gameState === 'start') {
+    return (
+      <div className="min-h-screen bg-slate-950 text-cyan-400 font-mono flex flex-col items-center justify-center relative overflow-hidden select-none">
+        <TechBackground />
+        <div className="z-10 max-w-md w-full text-center space-y-8 animate-fade-in-up p-4">
+          <div className="flex justify-center mb-6 relative group">
+            <div className="absolute inset-0 bg-cyan-500 blur-2xl opacity-20 group-hover:opacity-40 transition-opacity duration-500 animate-pulse"></div>
+            <div className="relative z-10 p-6 border-2 border-cyan-500/50 rounded-full bg-slate-900/50 backdrop-blur-sm">
+              <Terminal className="w-16 h-16 text-cyan-300" />
+            </div>
+            <div className="absolute inset-[-20px] border border-cyan-500/20 rounded-full animate-spin-slow border-dashed"></div>
+          </div>
+          <h1 className="font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-blue-400 to-purple-400 leading-tight drop-shadow-lg">
+            <span className="text-[26pt] block mb-2 tracking-wider">消失的代碼</span>
+            <span className="text-[16pt] block tracking-widest border-t border-cyan-500/30 pt-2 mt-2">2026尋找AI與創造它的科學家</span>
+          </h1>
+          <TechFrame>
+            <div className="flex items-start space-x-3 mb-4">
+              <Activity className="w-6 h-6 text-green-400 animate-pulse mt-1" />
+              <div>
+                <p className="text-lg text-slate-100 font-bold mb-1">
+                  系統警報：數據流中斷
+                </p>
+                <p className="text-cyan-200 text-sm">
+                  偵測到歷史時間軸異常。
+                  <br />
+                  <span className="text-xs text-slate-400 mt-2 block">
+                    MISSION: 進入展場尋找線索，修復受損檔案。
+                  </span>
+                </p>
+              </div>
+            </div>
+            <div className="h-1 w-full bg-slate-800 rounded-full overflow-hidden mb-2">
+               <div className="h-full bg-red-500/50 w-1/3 animate-pulse"></div>
+            </div>
+            <p className="text-right text-xs text-red-400 font-mono">INTEGRITY: 32%</p>
+          </TechFrame>
+          <button onClick={handleStart} onMouseEnter={() => playSound('hover')} className="group relative w-full overflow-hidden rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 p-[2px] transition-all duration-300 hover:shadow-[0_0_2rem_-0.5rem_#0891b2]">
+            <div className="relative flex items-center justify-center bg-slate-900 rounded-lg px-8 py-4 transition-all duration-300 group-hover:bg-opacity-0">
+              <span className="relative text-xl font-bold text-white group-hover:tracking-widest transition-all">
+                啟動修復程序
+              </span>
+              <ChevronRight className="ml-2 w-6 h-6 text-cyan-400 group-hover:translate-x-2 transition-transform" />
+              <Zap className="ml-2 w-5 h-5 text-yellow-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+            </div>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (gameState === 'complete') {
+    return (
+      <div className="min-h-screen bg-slate-950 text-cyan-400 font-mono flex flex-col items-center justify-center relative overflow-hidden select-none p-4">
+        <TechBackground />
+        <div className="z-10 max-w-md w-full text-center animate-scale-in">
+          {isStudentInfoLocked ? (
+            <>
+              <div className="relative inline-block animate-bounce-short">
+                 <div className="absolute inset-0 bg-yellow-500 blur-3xl opacity-20 animate-pulse"></div>
+                 <Award className="w-32 h-32 text-yellow-400 mx-auto mb-6 drop-shadow-[0_0_25px_rgba(250,204,21,0.6)] relative z-10" />
+              </div>
+              <h2 className="text-4xl font-bold text-white mb-2 tracking-wider animate-fade-in-up">任務完成</h2>
+              <p className="text-cyan-500 mb-8 font-mono text-lg animate-fade-in-up">SYSTEM RESTORED 100%</p>
+            </>
+          ) : (
+             <div className="mb-8 animate-pulse">
+                <div className="w-24 h-24 mx-auto mb-6 rounded-full bg-slate-900 border-4 border-cyan-500/30 flex items-center justify-center relative">
+                   <div className="absolute inset-0 border-t-2 border-cyan-400 rounded-full animate-spin"></div>
+                   <Brain className="w-10 h-10 text-cyan-400/50" />
+                </div>
+                <h2 className="text-3xl font-bold text-cyan-400 mb-2 tracking-wider">等待身分驗證</h2>
+                <p className="text-red-400 font-mono text-sm">請登錄探員身分以領取證書</p>
+             </div>
+          )}
+          <TechFrame className="border-yellow-500/30 bg-slate-900/90">
+            <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-slate-900 px-4 text-yellow-500 text-xs font-bold tracking-[0.2em] border border-yellow-500/50 rounded-full">
+              CERTIFIED AGENT
+            </div>
+            <h3 className="text-2xl text-white font-bold mb-4 mt-2">AI 歷史守護者</h3>
+            <div className="border-t border-slate-700 my-4 pt-4 bg-black/40 p-4 rounded-lg border border-slate-700/50">
+              <p className="text-slate-400 text-xs mb-2 tracking-widest">Stories of AI & the Scientists who Made It</p>
+              <div className="font-mono text-2xl text-yellow-400 tracking-wider font-bold animate-pulse">
+                2026-AI-SWSH
+              </div>
+            </div>
+            <div className="flex justify-between items-end mt-6 text-slate-500 font-mono text-xs">
+              <div className="text-left flex flex-col gap-2 w-full mr-4">
+                <div className="flex items-center gap-2">
+                   <span className="text-slate-600 uppercase tracking-wider text-[10px] pt-1">AGENT:</span>
+                   <div className="flex items-center gap-2 relative">
+                     <input 
+                       type="text" 
+                       placeholder="輸入班級" 
+                       value={studentClass}
+                       onChange={(e) => setStudentClass(e.target.value)}
+                       disabled={isStudentInfoLocked}
+                       className={`
+                         bg-transparent border-b w-20 text-center transition-all duration-300
+                         focus:outline-none focus:border-yellow-500
+                         placeholder-slate-700
+                         ${isStudentInfoLocked 
+                           ? 'border-transparent text-yellow-400 font-bold drop-shadow-[0_0_5px_rgba(250,204,21,0.5)]' 
+                           : 'border-slate-600 text-cyan-300'}
+                         ${!isStudentInfoLocked && !studentClass 
+                            ? 'animate-pulse border-red-500/70 shadow-[0_0_8px_rgba(239,68,68,0.4)]' 
+                            : ''}
+                       `}
+                     />
+                     <input 
+                       type="text" 
+                       placeholder="輸入姓名" 
+                       value={studentName}
+                       onChange={(e) => setStudentName(e.target.value)}
+                       disabled={isStudentInfoLocked}
+                       className={`
+                         bg-transparent border-b w-24 text-center transition-all duration-300
+                         focus:outline-none focus:border-yellow-500
+                         placeholder-slate-700
+                         ${isStudentInfoLocked 
+                           ? 'border-transparent text-yellow-400 font-bold drop-shadow-[0_0_5px_rgba(250,204,21,0.5)]' 
+                           : 'border-slate-600 text-cyan-300'}
+                         ${!isStudentInfoLocked && !studentName 
+                            ? 'animate-pulse border-red-500/70 shadow-[0_0_8px_rgba(239,68,68,0.4)]' 
+                            : ''}
+                       `}
+                     />
+                     {!isStudentInfoLocked && (
+                       <button onClick={handleStudentInfoConfirm} className="p-1 bg-cyan-800/50 hover:bg-green-600/50 text-cyan-400 hover:text-green-300 rounded-full transition-colors border border-cyan-500/30 hover:shadow-[0_0_10px_rgba(34,197,94,0.4)] animate-bounce" title="確認登記">
+                         <Check className="w-3 h-3" />
+                       </button>
+                     )}
+                     {isStudentInfoLocked && <Lock className="w-3 h-3 text-yellow-500/50 ml-1" />}
+                   </div>
+                </div>
+                <p className="tracking-wide opacity-80 pl-[42px]">
+                  {new Date().toLocaleString('zh-TW', { hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                </p>
+              </div>
+              <Brain className="w-8 h-8 opacity-50 shrink-0" />
+            </div>
+          </TechFrame>
+          <button onClick={resetGame} onMouseEnter={() => playSound('hover')} className="mt-12 flex items-center justify-center mx-auto text-slate-500 hover:text-cyan-400 transition-colors group px-6 py-2 rounded-full border border-transparent hover:border-cyan-500/30">
+            <RefreshCw className="w-4 h-4 mr-2 group-hover:rotate-180 transition-transform duration-500" />
+            重置模擬系統
+          </button>
+        </div>
+        {feedback && (
+          <div onClick={() => setFeedback(null)} className={`fixed bottom-8 left-4 right-4 md:left-1/2 md:-translate-x-1/2 md:w-full md:max-w-xl p-0 z-50 animate-slide-up cursor-pointer`}>
+            <div className={`backdrop-blur-xl border-2 rounded-xl shadow-2xl overflow-hidden relative ${feedback.type === 'success' ? 'bg-slate-900/90 border-green-500 shadow-[0_0_30px_rgba(34,197,94,0.3)]' : 'bg-slate-900/90 border-red-500 shadow-[0_0_30px_rgba(239,68,68,0.3)]'}`}>
+              <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] z-0 bg-[length:100%_2px,3px_100%] pointer-events-none"></div>
+              <div className="flex items-stretch relative z-10">
+                <div className={`w-16 flex items-center justify-center ${feedback.type === 'success' ? 'bg-green-600' : 'bg-red-600'}`}>
+                  {feedback.type === 'success' ? <Unlock className="w-8 h-8 text-white" /> : <Lock className="w-8 h-8 text-white" />}
+                </div>
+                <div className="p-4 flex-1">
+                  <h4 className={`font-bold text-xl mb-1 tracking-wider ${feedback.type === 'success' ? 'text-green-400' : 'text-red-400'}`}>
+                    {feedback.type === 'success' ? 'ACCESS GRANTED' : 'ACCESS DENIED'}
+                  </h4>
+                  <p className="text-slate-200">{feedback.msg}</p>
+                  {feedback.type === 'error' && (
+                    <div className="mt-3 flex items-center text-xs text-red-300/70 font-mono">
+                      <RefreshCw className="w-3 h-3 mr-1 animate-spin-slow" />
+                      SYSTEM REBOOTING... TAP TO RETRY
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // 4. 問答進行畫面 (Playing)
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col relative overflow-hidden">
+      <TechBackground />
+      {/* HUD Header */}
+      <div className="bg-slate-900/90 backdrop-blur-md border-b border-cyan-500/20 p-4 sticky top-0 z-20 shadow-[0_4px_20px_-5px_rgba(8,145,178,0.3)]">
+        <div className="max-w-2xl mx-auto flex items-center justify-between">
+          <div className="flex items-center">
+            <div className="p-2 bg-cyan-900/30 rounded-lg border border-cyan-500/30 mr-3 text-cyan-400">
+              {currentLevel.icon}
+            </div>
+            <div>
+               <h2 className="text-cyan-400 font-bold text-sm md:text-base tracking-wide uppercase">
+                 {currentLevel.title}
+               </h2>
+               <div className="flex items-center space-x-2 text-xs font-mono text-slate-500">
+                  <span>LAYER {currentLevel.id}</span>
+                  <span className="text-slate-700">|</span>
+                  <span>SECURE CHANNEL</span>
+               </div>
+            </div>
+          </div>
+          <button onClick={() => setIsMuted(!isMuted)} className="p-2 text-slate-500 hover:text-cyan-400 transition-colors rounded-full hover:bg-slate-800">
+            {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+          </button>
+        </div>
+        <div className="max-w-2xl mx-auto mt-4 relative h-2 bg-slate-800 rounded-full overflow-hidden">
+           <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-20"></div>
+           <div className="h-full bg-gradient-to-r from-cyan-600 to-blue-500 transition-all duration-500 shadow-[0_0_10px_#06b6d4]" style={{ width: `${((currentQuestionIndex) / currentLevel.questions.length) * 100}%` }}>
+             <div className="absolute right-0 top-0 bottom-0 w-[2px] bg-white/50 shadow-[0_0_5px_white]"></div>
+           </div>
+        </div>
+      </div>
+
+      {/* Main Game Area */}
+      <div className="flex-1 p-4 md:p-8 max-w-2xl mx-auto w-full flex flex-col justify-center relative z-10">
+        <div className="animate-fade-in">
+          <div className="bg-cyan-950/30 border border-cyan-500/30 p-4 mb-6 rounded-lg relative overflow-hidden group hover:border-cyan-500/60 transition-colors">
+             <div className="absolute top-0 left-0 w-1 h-full bg-cyan-500"></div>
+             <p className="text-cyan-200 text-sm md:text-base font-mono leading-relaxed pl-2">
+               <span className="text-cyan-400 font-bold mr-2">{'>'} COMMAND:</span>
+               {currentLevel.description}
+             </p>
+          </div>
+          <h3 className="text-xl md:text-2xl font-bold leading-relaxed mb-8 text-white drop-shadow-md">
+            {currentQuestion.question}
+          </h3>
+          <div className="space-y-4">
+            {currentQuestion.type === 'choice' ? (
+              <div className="grid gap-3">
+                {currentQuestion.options.map((option, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => handleChoiceSubmit(option)}
+                    onMouseEnter={() => playSound('hover')}
+                    disabled={feedback !== null}
+                    className={`
+                      w-full p-4 text-left rounded-lg border-l-4 transition-all duration-200 relative overflow-hidden group font-mono
+                      ${feedback 
+                        ? (option === currentQuestion.answer 
+                            ? 'bg-green-900/40 border-green-500 text-green-300 shadow-[0_0_15px_rgba(34,197,94,0.3)]' 
+                            : 'bg-slate-800/50 border-slate-700 text-slate-500 opacity-50')
+                        : 'bg-slate-800/60 border-slate-600 hover:border-cyan-400 hover:bg-cyan-900/20 hover:text-cyan-100 hover:translate-x-1'
+                      }
+                    `}
+                  >
+                    <div className="flex items-center justify-between relative z-10">
+                      <span className="text-lg">{option}</span>
+                      {feedback && option === currentQuestion.answer && <Unlock className="w-5 h-5 text-green-400 animate-bounce" />}
+                      {!feedback && <div className="w-2 h-2 rounded-full bg-cyan-500 opacity-0 group-hover:opacity-100 shadow-[0_0_5px_#06b6d4]"></div>}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <form onSubmit={handleInputSubmit} className="relative">
+                <input
+                  type="text"
+                  value={userInput}
+                  onChange={(e) => setUserInput(e.target.value)}
+                  placeholder="輸入解密代碼..."
+                  disabled={feedback !== null}
+                  className="w-full bg-slate-900/80 border-2 border-slate-600 rounded-lg p-4 text-lg text-center font-mono text-cyan-300 focus:outline-none focus:border-cyan-500 focus:shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all placeholder:text-slate-600 uppercase tracking-widest"
+                />
+                <button 
+                  type="submit"
+                  disabled={!userInput || feedback !== null}
+                  onMouseEnter={() => playSound('hover')}
+                  className="mt-6 w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3 px-4 rounded-lg transition-all shadow-lg hover:shadow-cyan-500/25 flex items-center justify-center tracking-widest"
+                >
+                  {feedback ? <Activity className="animate-spin mr-2" /> : <Zap className="mr-2 w-5 h-5" />}
+                  執行解碼
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+
+        {feedback && (
+          <div onClick={() => setFeedback(null)} className={`fixed bottom-8 left-4 right-4 md:left-1/2 md:-translate-x-1/2 md:w-full md:max-w-xl p-0 z-50 animate-slide-up cursor-pointer`}>
+            <div className={`backdrop-blur-xl border-2 rounded-xl shadow-2xl overflow-hidden relative ${feedback.type === 'success' ? 'bg-slate-900/90 border-green-500 shadow-[0_0_30px_rgba(34,197,94,0.3)]' : 'bg-slate-900/90 border-red-500 shadow-[0_0_30px_rgba(239,68,68,0.3)]'}`}>
+              <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] z-0 bg-[length:100%_2px,3px_100%] pointer-events-none"></div>
+              <div className="flex items-stretch relative z-10">
+                <div className={`w-16 flex items-center justify-center ${feedback.type === 'success' ? 'bg-green-600' : 'bg-red-600'}`}>
+                  {feedback.type === 'success' ? <Unlock className="w-8 h-8 text-white" /> : <Lock className="w-8 h-8 text-white" />}
+                </div>
+                <div className="p-4 flex-1">
+                  <h4 className={`font-bold text-xl mb-1 tracking-wider ${feedback.type === 'success' ? 'text-green-400' : 'text-red-400'}`}>
+                    {feedback.type === 'success' ? 'ACCESS GRANTED' : 'ACCESS DENIED'}
+                  </h4>
+                  <p className="text-slate-200">{feedback.msg}</p>
+                  {feedback.type === 'error' && (
+                    <div className="mt-3 flex items-center text-xs text-red-300/70 font-mono">
+                      <RefreshCw className="w-3 h-3 mr-1 animate-spin-slow" />
+                      SYSTEM REBOOTING... TAP TO RETRY
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+      
+      {/* 注入 AI 協同助手 */}
+      <AICopilot currentQuestion={currentQuestion} playSound={playSound} />
+    </div>
+  );
+};
+
+export default App;
